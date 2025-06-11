@@ -1,6 +1,7 @@
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, send_from_directory
 from datetime import datetime, time
 import pytz
+import os
 
 app = Flask(__name__)
 
@@ -36,6 +37,9 @@ def home():
     <html>
     <head>
         <title>Время Намаза — Almaty</title>
+        <link rel="manifest" href="/manifest.json">
+        <meta name="theme-color" content="#003366">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             body { font-family: Arial, sans-serif; background: #e6f0ff; color: #003366; padding: 20px; }
             h1 { text-align: center; }
@@ -44,23 +48,8 @@ def home():
             .prayer { font-weight: bold; }
             .footer { text-align: center; margin-top: 30px; font-size: 14px; color: #555; }
             #current-time { text-align: center; font-size: 18px; margin-bottom: 20px; }
+            #notif-toggle { display: block; margin: 20px auto; padding: 10px 20px; background: #003366; color: white; border: none; border-radius: 8px; cursor: pointer; }
         </style>
-        <script>
-            // Функция обновления времени на странице каждую секунду
-            function updateTime() {
-                const now = new Date();
-                const hours = String(now.getHours()).padStart(2, '0');
-                const minutes = String(now.getMinutes()).padStart(2, '0');
-                const seconds = String(now.getSeconds()).padStart(2, '0');
-                document.getElementById('current-time').textContent = 'Текущее время: ' + hours + ':' + minutes + ':' + seconds;
-            }
-
-            // Запускаем обновление каждую секунду
-            setInterval(updateTime, 1000);
-
-            // Запуск сразу при загрузке страницы
-            window.onload = updateTime;
-        </script>
     </head>
     <body>
         <h1>🕌 Время намаза — Almaty</h1>
@@ -73,11 +62,69 @@ def home():
             <li>🌆 <span class="prayer">Магриб:</span> {{ timings["Maghrib"] }}</li>
             <li>🌃 <span class="prayer">Иша:</span> {{ timings["Isha"] }}</li>
         </ul>
+
+        <button id="notif-toggle">Включить уведомления</button>
         <div class="footer">Обнови страницу для обновления времени намаза</div>
+
+        <script>
+            const namazTimes = {
+                Fajr: "{{ timings['Fajr'] }}",
+                Sunrise: "{{ timings['Sunrise'] }}",
+                Dhuhr: "{{ timings['Dhuhr'] }}",
+                Asr: "{{ timings['Asr'] }}",
+                Maghrib: "{{ timings['Maghrib'] }}",
+                Isha: "{{ timings['Isha'] }}"
+            };
+
+            let notificationsEnabled = false;
+
+            document.getElementById("notif-toggle").addEventListener("click", async () => {
+                if (Notification.permission !== "granted") {
+                    await Notification.requestPermission();
+                }
+
+                notificationsEnabled = !notificationsEnabled;
+                document.getElementById("notif-toggle").textContent = notificationsEnabled ? "Выключить уведомления" : "Включить уведомления";
+            });
+
+            function updateTime() {
+                const now = new Date();
+                const hours = String(now.getHours()).padStart(2, '0');
+                const minutes = String(now.getMinutes()).padStart(2, '0');
+                const seconds = String(now.getSeconds()).padStart(2, '0');
+                document.getElementById('current-time').textContent = 'Текущее время: ' + hours + ':' + minutes + ':' + seconds;
+
+                const currentTime = hours + ":" + minutes;
+
+                if (notificationsEnabled) {
+                    for (const [name, time] of Object.entries(namazTimes)) {
+                        if (time === currentTime) {
+                            new Notification("🕌 Время намаза", {
+                                body: `${name} — сейчас время намаза`,
+                                icon: "/static/icons/icon-192.png"
+                            });
+                        }
+                    }
+                }
+            }
+
+            setInterval(updateTime, 1000);
+            window.onload = updateTime;
+
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('/static/sw.js')
+                    .then(() => console.log("✅ Service Worker зарегистрирован"))
+                    .catch(err => console.error("❌ SW ошибка:", err));
+            }
+        </script>
     </body>
     </html>
     """
     return render_template_string(html, timings=timings, now=now)
+
+@app.route('/manifest.json')
+def manifest():
+    return send_from_directory(os.path.dirname(__file__), 'manifest.json')
 
 if __name__ == "__main__":
     app.run(debug=True)
