@@ -5,13 +5,11 @@ import requests
 
 app = Flask(__name__)
 
-# Настройки для API: можно менять method и tune, чтобы подгонять времена
 LATITUDE = 43.238949
 LONGITUDE = 76.889709
-METHOD = 99  # Попробуй 2, 4, 7, 8, 9, 99 и смотри, что ближе к твоему расписанию
-SCHOOL = 1   # 0 — Шафии, 1 — Ханбали/Ханафи
-# tune — 7 чисел: Imsak,Fajr,Sunrise,Dhuhr,Asr,Maghrib,Isha (в минутах)
-TUNE = "-5,0,4,3,4,3,0,0,0,0,0"  # Пример сдвигов, подгоняй под себя
+METHOD = 99  # кастомный метод (твой)
+SCHOOL = 1   # ханафи
+TUNE = "-5,0,0,3,2,2,0"  # подстройка: Imsak,Fajr,Sunrise,Dhuhr,Asr,Maghrib,Isha
 
 def get_namaz_times():
     url = "https://api.aladhan.com/v1/timings"
@@ -29,7 +27,6 @@ def get_namaz_times():
 
     now = datetime.now(tz)
     res = {}
-    # Берём только нужные нам времена
     for name in ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"]:
         h, m = map(int, timings[name].split(":"))
         dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -42,7 +39,6 @@ def get_next_and_left(times, now):
         if dt > now:
             diff = dt - now
             return name, diff.seconds // 3600, (diff.seconds % 3600) // 60
-    # Если все времена прошли — следующий на следующий день
     name, dt = sorted_times[0]
     diff = dt + timedelta(days=1) - now
     return name, diff.seconds // 3600, (diff.seconds % 3600) // 60
@@ -58,11 +54,11 @@ def home():
 
     html = """
     <!DOCTYPE html>
-    <html lang="ru">
+    <html lang=\"ru\">
     <head>
-        <meta charset="utf-8" />
+        <meta charset=\"utf-8\" />
         <title>🕌 Намаз — Almaty</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
         <style>
             body { font-family: Arial, sans-serif; background: #e6f0ff; color: #003366; padding: 20px; }
             h1 { text-align: center; }
@@ -76,19 +72,19 @@ def home():
     </head>
     <body>
         <h1>🕌 Намаз — Almaty</h1>
-        <div id="now">Сейчас: {{ now_str }}</div>
-        <div id="next">Следующий: <b>{{ next_prayer }}</b> через {{ hrs_left }} ч {{ mins_left }} мин</div>
-        <ul id="list">
+        <div id=\"now\">Сейчас: {{ now_str }}</div>
+        <div id=\"next\">Следующий: <b>{{ next_prayer }}</b> через {{ hrs_left }} ч {{ mins_left }} мин</div>
+        <ul id=\"list\">
         {% for name, time in times_str.items() %}
-            <li data-name="{{ name }}">
+            <li data-name=\"{{ name }}\">
             {% if name == "Fajr" %}🌙{% elif name == "Sunrise" %}🌅{% elif name == "Dhuhr" %}☀️
             {% elif name == "Asr" %}🌇{% elif name == "Maghrib" %}🌆{% elif name == "Isha" %}🌃{% endif %}
             {{ name }}: {{ time }}
             </li>
         {% endfor %}
         </ul>
-        <button id="toggle">Включить уведомления</button>
-        <div class="footer">Обнови страницу для актуализации</div>
+        <button id=\"toggle\">Включить уведомления</button>
+        <div class=\"footer\">Обнови страницу для актуализации</div>
 
         <script>
             const T = {{ times_str | tojson }};
@@ -110,11 +106,23 @@ def home():
             function update() {
                 const d = new Date();
                 const cm = d.getHours() * 60 + d.getMinutes();
-                let currentPrayer = Object.keys(Mets)[0];
-                for (const [name, val] of Object.entries(Mets)) {
-                    if (val <= cm) currentPrayer = name;
+
+                let sorted = Object.entries(Mets).sort((a, b) => a[1] - b[1]);
+                let currentPrayer = sorted[sorted.length - 1][0];
+
+                for (let i = 0; i < sorted.length - 1; i++) {
+                    const [name, start] = sorted[i];
+                    const [, end] = sorted[i + 1];
+
+                    if (cm >= start && cm < end) {
+                        currentPrayer = name;
+                        break;
+                    }
                 }
-                if (cm < Math.min(...Object.values(Mets))) currentPrayer = Object.keys(Mets).pop();
+
+                if (cm < sorted[0][1]) {
+                    currentPrayer = sorted[sorted.length - 1][0];
+                }
 
                 document.querySelectorAll('#list li').forEach(li => {
                     li.classList.toggle('cur', li.dataset.name === currentPrayer);
