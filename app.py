@@ -1,242 +1,146 @@
-from flask import Flask, render_template_string, send_from_directory
-from datetime import datetime, time, timedelta
+from flask import Flask, render_template_string
+from datetime import datetime, timedelta
 import pytz
-import os
+import requests
 
 app = Flask(__name__)
 
+# Настройки для API: можно менять method и tune, чтобы подгонять времена
+LATITUDE = 43.238949
+LONGITUDE = 76.889709
+METHOD = 99  # Попробуй 2, 4, 7, 8, 9, 99 и смотри, что ближе к твоему расписанию
+SCHOOL = 1   # 0 — Шафии, 1 — Ханбали/Ханафи
+# tune — 7 чисел: Imsak,Fajr,Sunrise,Dhuhr,Asr,Maghrib,Isha (в минутах)
+TUNE = "-5,0,4,3,4,3,0,0,0,0,0"  # Пример сдвигов, подгоняй под себя
+
 def get_namaz_times():
-    tz = pytz.timezone("Asia/Almaty")
-    today = datetime.now(tz).date()
-
-    fixed_times = {
-        "Fajr": "02:24",
-        "Sunrise": "04:09",
-        "Dhuhr": "11:55",
-        "Asr": "17:14",
-        "Maghrib": "19:35",
-        "Isha": "21:20"
+    url = "https://api.aladhan.com/v1/timings"
+    params = {
+        "latitude": LATITUDE,
+        "longitude": LONGITUDE,
+        "method": METHOD,
+        "school": SCHOOL,
+        "tune": TUNE
     }
+    resp = requests.get(url, params=params)
+    data = resp.json()["data"]
+    timings = data["timings"]
+    tz = pytz.timezone(data["meta"]["timezone"])
 
-    result = {}
-    for name, time_str in fixed_times.items():
-        hour, minute = map(int, time_str.split(":"))
-        dt = datetime.combine(today, time(hour, minute))
-        dt = tz.localize(dt)
-        result[name] = dt
+    now = datetime.now(tz)
+    res = {}
+    # Берём только нужные нам времена
+    for name in ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"]:
+        h, m = map(int, timings[name].split(":"))
+        dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        res[name] = dt
+    return res
 
-    return result
-
-def get_next_prayer_and_time_left(namaz_datetimes, now):
-    sorted_prayers = sorted(namaz_datetimes.items(), key=lambda x: x[1])
-    for name, dt in sorted_prayers:
+def get_next_and_left(times, now):
+    sorted_times = sorted(times.items(), key=lambda x: x[1])
+    for name, dt in sorted_times:
         if dt > now:
-            next_prayer = name
             diff = dt - now
-            break
-    else:
-        # Если все намазы уже прошли — следующий завтра (первый + 1 день)
-        name, dt = sorted_prayers[0]
-        next_prayer = name
-        diff = dt + timedelta(days=1) - now
-
-    hours, remainder = divmod(diff.seconds, 3600)
-    minutes = remainder // 60
-
-    return next_prayer, hours, minutes
-
-def get_current_prayer(namaz_datetimes, now):
-    """
-    Определяем текущий намаз, то есть последний, время которого уже прошло, но следующий ещё не наступил.
-    Например, если сейчас между Зухр и Аср — текущий намаз Зухр.
-    """
-    sorted_prayers = sorted(namaz_datetimes.items(), key=lambda x: x[1])
-
-    current = None
-    for i, (name, dt) in enumerate(sorted_prayers):
-        if dt > now:
-            # Намаз, который сейчас идёт — это предыдущий из списка
-            current = sorted_prayers[i-1][0] if i > 0 else sorted_prayers[-1][0]
-            break
-    else:
-        # Если сейчас после последнего намаза — значит сейчас последний намаз (Иша)
-        current = sorted_prayers[-1][0]
-
-    return current
+            return name, diff.seconds // 3600, (diff.seconds % 3600) // 60
+    # Если все времена прошли — следующий на следующий день
+    name, dt = sorted_times[0]
+    diff = dt + timedelta(days=1) - now
+    return name, diff.seconds // 3600, (diff.seconds % 3600) // 60
 
 @app.route("/")
 def home():
-    timings = get_namaz_times()
+    times = get_namaz_times()
     tz = pytz.timezone("Asia/Almaty")
-    now_dt = datetime.now(tz)
-    now_str = now_dt.strftime("%H:%M:%S")
-
-    next_prayer, hours_left, minutes_left = get_next_prayer_and_time_left(timings, now_dt)
-    # current_prayer теперь не нужен для подсветки на сервере, так как подсветка будет JS
-    #current_prayer = get_current_prayer(timings, now_dt)
-
-    timings_str = {k: v.strftime("%H:%M") for k, v in timings.items()}
+    now = datetime.now(tz)
+    now_str = now.strftime("%H:%M:%S")
+    next_prayer, hrs_left, mins_left = get_next_and_left(times, now)
+    times_str = {k: v.strftime("%H:%M") for k, v in times.items()}
 
     html = """
-    <html>
+    <!DOCTYPE html>
+    <html lang="ru">
     <head>
-        <title>Время Намаза — Almaty</title>
-        <link rel="manifest" href="/manifest.json">
-        <meta name="theme-color" content="#003366">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta charset="utf-8" />
+        <title>🕌 Намаз — Almaty</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
         <style>
             body { font-family: Arial, sans-serif; background: #e6f0ff; color: #003366; padding: 20px; }
             h1 { text-align: center; }
-            ul { list-style-type: none; padding: 0; max-width: 300px; margin: auto; }
-            li { padding: 8px 0; font-size: 20px; }
-            .prayer { font-weight: normal; padding: 4px 8px; border-radius: 8px; }
-            .current { 
-                background-color: #d0f0c0; /* светло-зеленый */
-                font-weight: bold;
-                color: #2e7d32; /* темно-зеленый текст */
-            }
-            .footer { text-align: center; margin-top: 30px; font-size: 14px; color: #555; }
-            #current-time { text-align: center; font-size: 18px; margin-bottom: 20px; }
-            #notif-toggle { display: block; margin: 20px auto; padding: 10px 20px; background: #003366; color: white; border: none; border-radius: 8px; cursor: pointer; }
-            #next-prayer-info { text-align: center; font-size: 18px; margin-bottom: 20px; }
+            #now, #next { text-align: center; margin: 10px 0; font-size: 18px; }
+            ul { list-style: none; padding: 0; max-width: 300px; margin: auto; }
+            li { padding: 6px; border-radius: 6px; font-size: 20px; }
+            .cur { background: #d0f0c0; font-weight: bold; color: #2e7d32; }
+            #toggle { display: block; margin: 15px auto; padding: 10px 20px; background: #003366; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+            .footer { text-align: center; color: #555; font-size: 14px; margin-top: 20px; }
         </style>
     </head>
     <body>
-        <h1>🕌 Время намаза — Almaty</h1>
-        <div id="current-time">Текущее время: {{ now }}</div>
-        <div id="next-prayer-info">
-            Следующий намаз: <strong>{{ next_prayer }}</strong> через {{ hours_left }} часов {{ minutes_left }} минут
-        </div>
-        <ul id="prayer-list">
-            {% for name, time in timings.items() %}
-                <li class="prayer" data-name="{{ name }}">
-                    {% if name == "Fajr" %}🌙{% elif name == "Sunrise" %}🌅{% elif name == "Dhuhr" %}☀️{% elif name == "Asr" %}🌇{% elif name == "Maghrib" %}🌆{% elif name == "Isha" %}🌃{% endif %}
-                    <span class="prayer-name">{{ name }}:</span> {{ time }}
-                </li>
-            {% endfor %}
+        <h1>🕌 Намаз — Almaty</h1>
+        <div id="now">Сейчас: {{ now_str }}</div>
+        <div id="next">Следующий: <b>{{ next_prayer }}</b> через {{ hrs_left }} ч {{ mins_left }} мин</div>
+        <ul id="list">
+        {% for name, time in times_str.items() %}
+            <li data-name="{{ name }}">
+            {% if name == "Fajr" %}🌙{% elif name == "Sunrise" %}🌅{% elif name == "Dhuhr" %}☀️
+            {% elif name == "Asr" %}🌇{% elif name == "Maghrib" %}🌆{% elif name == "Isha" %}🌃{% endif %}
+            {{ name }}: {{ time }}
+            </li>
+        {% endfor %}
         </ul>
-
-        <button id="notif-toggle">Включить уведомления</button>
-        <div class="footer">Обнови страницу для обновления времени намаза</div>
+        <button id="toggle">Включить уведомления</button>
+        <div class="footer">Обнови страницу для актуализации</div>
 
         <script>
-            const namazTimes = {
-                Fajr: "{{ timings['Fajr'] }}",
-                Sunrise: "{{ timings['Sunrise'] }}",
-                Dhuhr: "{{ timings['Dhuhr'] }}",
-                Asr: "{{ timings['Asr'] }}",
-                Maghrib: "{{ timings['Maghrib'] }}",
-                Isha: "{{ timings['Isha'] }}"
-            };
+            const T = {{ times_str | tojson }};
+            let notificationsOn = false;
 
-            let notificationsEnabled = false;
-
-            document.getElementById("notif-toggle").addEventListener("click", async () => {
-                if (Notification.permission !== "granted") {
+            document.getElementById('toggle').onclick = async function () {
+                if (Notification.permission !== 'granted') {
                     await Notification.requestPermission();
                 }
+                notificationsOn = !notificationsOn;
+                this.textContent = notificationsOn ? 'Выключить уведомления' : 'Включить уведомления';
+            };
 
-                notificationsEnabled = !notificationsEnabled;
-                document.getElementById("notif-toggle").textContent = notificationsEnabled ? "Выключить уведомления" : "Включить уведомления";
-            });
+            const Mets = Object.fromEntries(Object.entries(T).map(([name, time]) => {
+                const [h, m] = time.split(':').map(Number);
+                return [name, h * 60 + m];
+            }));
 
-            function timeToMinutes(t) {
-                const [h, m] = t.split(":").map(Number);
-                return h * 60 + m;
-            }
+            function update() {
+                const d = new Date();
+                const cm = d.getHours() * 60 + d.getMinutes();
+                let currentPrayer = Object.keys(Mets)[0];
+                for (const [name, val] of Object.entries(Mets)) {
+                    if (val <= cm) currentPrayer = name;
+                }
+                if (cm < Math.min(...Object.values(Mets))) currentPrayer = Object.keys(Mets).pop();
 
-            const namazTimesMinutes = {};
-            for (const [name, t] of Object.entries(namazTimes)) {
-                namazTimesMinutes[name] = timeToMinutes(t);
-            }
+                document.querySelectorAll('#list li').forEach(li => {
+                    li.classList.toggle('cur', li.dataset.name === currentPrayer);
+                });
 
-            
-                   function updateCurrentPrayerHighlight() {
-    const now = new Date();
-    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+                document.getElementById('now').textContent = 'Сейчас: ' + d.toTimeString().slice(0, 8);
 
-    const sortedPrayers = Object.entries(namazTimesMinutes).sort((a,b) => a[1] - b[1]);
-
-    // Найдём текущий намаз - последний, у которого время <= currentMinutes
-    // Если текущее время меньше времени первого намаза (например, 02:00 < 02:24),
-    // значит текущий намаз - последний из предыдущего дня (Иша)
-    let currentPrayer = sortedPrayers[0][0];
-    for (let i = 0; i < sortedPrayers.length; i++) {
-        if (sortedPrayers[i][1] <= currentMinutes) {
-            currentPrayer = sortedPrayers[i][0];
-        }
-    }
-    if (currentMinutes < sortedPrayers[0][1]) {
-        // Текущий намаз последний из списка (Иша)
-        currentPrayer = sortedPrayers[sortedPrayers.length - 1][0];
-    }
-
-    document.querySelectorAll("#prayer-list li.prayer").forEach(li => {
-        li.classList.remove("current");
-        // Убираем стрелочку из span с классом arrow, если есть
-        const arrowSpan = li.querySelector(".arrow");
-        if (arrowSpan) {
-            arrowSpan.remove();
-        }
-        if (li.dataset.name === currentPrayer) {
-            li.classList.add("current");
-            // Добавим стрелочку в начало li, не ломая эмодзи и текст
-            const arrow = document.createElement("span");
-            arrow.textContent = "▶️ ";
-            arrow.classList.add("arrow");
-            li.prepend(arrow);
-        }
-    });
-}
- 
-
-            function updateTime() {
-                const now = new Date();
-                const hours = String(now.getHours()).padStart(2, '0');
-                const minutes = String(now.getMinutes()).padStart(2, '0');
-                const seconds = String(now.getSeconds()).padStart(2, '0');
-                document.getElementById('current-time').textContent = 'Текущее время: ' + hours + ':' + minutes + ':' + seconds;
-
-                const currentTime = hours + ":" + minutes;
-
-                if (notificationsEnabled) {
-                    for (const [name, time] of Object.entries(namazTimes)) {
+                if (notificationsOn) {
+                    const mm = ('0' + d.getMinutes()).slice(-2);
+                    const hh = d.getHours();
+                    const currentTime = `${hh}:${mm}`;
+                    for (const [name, time] of Object.entries(T)) {
                         if (time === currentTime) {
-                            new Notification("🕌 Время намаза", {
-                                body: `${name} — сейчас время намаза`,
-                                icon: "/static/icons/icon-192.png"
-                            });
+                            new Notification('🕌 Намаз', { body: name });
                         }
                     }
                 }
             }
 
-            setInterval(() => {
-                updateCurrentPrayerHighlight();
-                updateTime();
-            }, 1000);
-
-            window.onload = () => {
-                updateCurrentPrayerHighlight();
-                updateTime();
-            };
-
-            if ('serviceWorker' in navigator) {
-                navigator.serviceWorker.register('/static/sw.js')
-                    .then(() => console.log("✅ Service Worker зарегистрирован"))
-                    .catch(err => console.error("❌ SW ошибка:", err));
-            }
+            setInterval(update, 1000);
+            window.onload = update;
         </script>
     </body>
     </html>
     """
-    return render_template_string(html, timings=timings_str, now=now_str, 
-                                  next_prayer=next_prayer, hours_left=hours_left, minutes_left=minutes_left)
-
-
-@app.route('/manifest.json')
-def manifest():
-    return send_from_directory(os.path.dirname(__file__), 'manifest.json')
+    return render_template_string(html, now_str=now_str, next_prayer=next_prayer, hrs_left=hrs_left, mins_left=mins_left, times_str=times_str)
 
 if __name__ == "__main__":
     app.run(debug=True)
